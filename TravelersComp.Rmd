@@ -1,0 +1,107 @@
+---
+title: "Travelers Comp Group 07"
+author: "Taarak Shah"
+date: "11/3/2020"
+output: pdf_document
+---
+
+```{r}
+#model selection
+library(leaps)
+```
+
+```{r}
+test <- read.csv("InsNova_test.csv",header=T)
+train <- read.csv("InsNova_train.csv",header=T)
+
+head(test)
+head(train)
+```
+
+
+```{r}
+# create train holdout set
+set.seed(8051)
+n = nrow(train)
+index = sample(seq(1:n), 0.7*n)
+train_sub = train[index,]
+val = train[-index,]
+```
+
+```{r}
+write.csv(train_sub, "trainsub.csv", row.names = F)
+write.csv(val, "val.csv", row.names = F)
+```
+# test is without the claim_ind, claim_count, claim_cost vars
+# want to predict claim_cost using covariates
+
+Goal is to predict claim_cost. Create basic correlation matrix.
+
+```{r}
+lm1 <- glm(claim_cost ~ veh_value + exposure + veh_body + veh_age + gender + area + dr_age, data=train_sub)
+summary(lm1)
+
+#step(lm1, direction = "backward")
+```
+
+```{r}
+#(bss.reg.sum = summary(regsubsets(claim_cost ~ veh_value + exposure + veh_body + veh_age + gender + area + dr_age, data=train)))
+#which.max(bss.reg.sum$adjr2)
+```
+
+# via AIC step
+```{r}
+lm2 <- glm(formula = claim_cost ~ veh_value + exposure + veh_age + gender + dr_age, data = train_sub)
+summary(lm2)
+```
+
+# via BSS reg
+```{r}
+lm3 <- glm(claim_cost ~ exposure + veh_age + gender + dr_age, data = train_sub)
+summary(lm3)
+```
+
+```{r}
+normalizedGini <- function(aa, pp) {
+    Gini <- function(a, p) {
+        if (length(a) !=  length(p)) stop("Actual and Predicted need to be equal lengths!")
+        temp.df <- data.frame(actual = a, pred = p, range=c(1:length(a)))
+        temp.df <- temp.df[order(-temp.df$pred, temp.df$range),]
+        population.delta <- 1 / length(a)
+        total.losses <- sum(a)
+        null.losses <- rep(population.delta, length(a)) # Hopefully is similar to accumulatedPopulationPercentageSum
+        accum.losses <- temp.df$actual / total.losses # Hopefully is similar to accumulatedLossPercentageSum
+        gini.sum <- cumsum(accum.losses - null.losses) # Not sure if this is having the same effect or not
+        sum(gini.sum) / length(a)
+    }
+    Gini(aa,pp) / Gini(aa,aa)
+}
+```
+
+```{r}
+# with original model, all terms, no interaction
+pred <- predict(lm1, newdata=val)
+normalizedGini(val$claim_cost, pred)
+
+# with AIC step selection
+pred <- predict(lm2, newdata=val)
+normalizedGini(val$claim_cost, pred)
+
+# with BSS selection
+pred <- predict(lm3, newdata=val)
+normalizedGini(val$claim_cost, pred)
+
+# lm3 is best Gini
+```
+
+```{r}
+# predict best on full training set, upload predicted vals to Kaggle
+lm3_full <- glm(claim_cost ~ exposure + veh_age + gender + dr_age, data = train)
+pred <- predict(lm3_full,newdata=test)
+
+# export id,claim_cost
+upl_df <- data.frame(cbind("id"=seq(1:nrow(test)),"claim_cost"=pred))
+upl_df
+write.csv(upl_df, "r_upload_1.csv", row.names = F)
+# got 0.10229 on kaggle, worse than sklearn basic
+```

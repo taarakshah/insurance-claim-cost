@@ -1,0 +1,224 @@
+---
+title: "Travelers_Tweedie"
+author: "Taarak Shah"
+date: "11/27/2020"
+output: pdf_document
+---
+
+```{r}
+library(statmod)
+library(raster)
+library(sp)
+library(dismo)
+library(gbm)
+library(reldist)
+library(tweedie)
+library(quantreg)
+```
+
+```{r}
+test <- read.csv("InsNova_test.csv",header=T)
+train_orig <- read.csv("InsNova_train.csv",header=T)
+
+head(test)
+head(train_orig)
+```
+
+```{r}
+# create train holdout set
+set.seed(8051)
+n = nrow(train_orig)
+index = sample(seq(1:n), 0.7*n)
+train = train_orig[index,]
+valid = train_orig[-index,]
+```
+
+```{r}
+### gini test
+giniTest <- function(y, py){
+  # Calculate a gini score
+  # Parameters:
+  #     y: The real data from observation
+  #     py: The predicted value from model
+  # Return: gini score for this prediction
+  # Algorithm: 
+  #   1. Use a uniform random vector to break ties from predicted values
+  #   2. Use predicted values to rank observed y
+  #   3. Calculated gini score used ranked observed y.
+  data <- as.data.frame(cbind(y, py))
+  set.seed(1)
+  n <- length(y)
+  data$rand.unif <- runif(n)
+  
+  sorted.y <- data[order(data$py, data$rand.unif), ][, 1]
+  i <- seq(n)
+  giniIndex <- 1-2/(n-1)*(n-sum(sorted.y*i)/sum(sorted.y))
+  return(giniIndex)
+}
+
+
+### binary function
+binary.add <- function(vec, k){
+  # Perform a binary addition. Add 1 to current value.
+  # Parameters: 
+  #   vec, a vectory/1D array containing TRUE or FALSE          
+  #   k: the position to add 1
+  # Return: The result of adding 1 to current value.
+  # For example:  {TRUE, FALSE, FALSE} -> {TRUE, FALSE, TRUE}
+  #               {TRUE, FALSE, TRUE}  -> {TRUE, TRUE, FALSE}
+  if(k == 0) return(vec)
+  if(vec[k] == FALSE){
+    vec[k] = TRUE
+    return(vec)
+  }
+  vec[k] = FALSE
+  binary.add(vec, k-1)
+}
+
+
+# 
+# ### load data
+# train <- read.csv("~/Downloads/Travelers/Kangaroo_train.csv", 
+#                   colClasses=c("veh_age"="factor", "agecat"="factor"))
+# valid <- read.csv("~/Downloads/Travelers/Kangaroo_valid.csv",
+#                   colClasses=c("veh_age"="factor", "agecat"="factor"))
+# hold <- read.csv("~/Downloads/Travelers/Kangaroo_hold.csv",
+#                  colClasses=c("veh_age"="factor", "agecat"="factor"))
+
+### Tweedie model 
+#find power p for tweedie model
+power = tweedie.profile(rbind(train,valid)$claim_cost~1, weights = rbind(train,valid)$exposure, 
+                        xi.vec=seq(1.1, 1.9, length=9), do.plot=TRUE)
+#str(power)
+#### power = 1.5
+```
+
+```{r}
+varnames <- names(train)[2:8] # All available variables may be used for fit
+n <- length(varnames)       # Number of available variables X's
+index <- array(FALSE, n)    # An indicator saying which x's will be used for fit
+giniScore <- array(0, 2^n-1) # An array to collect gini scores 
+formulas <- vector("list", 2^n-1) # An list to collect formulas
+```
+
+```{r}
+# Loop all possible combinations of x's,
+# Perform Tweedie fit
+# Record gini score and fiting formula
+# Note: y ~ 1 is not fitted. Thus, 2^n - 1 fittings are performed.
+for (i in 1:(2^n - 2)) {
+  index <- binary.add(index, n)
+  fmla <- as.formula(paste("claim_cost ~ ", paste(varnames[index], collapse = "+")))
+  fit1 <- glm(formula = fmla, family = tweedie(var.power = 1.5, link.power = 0), 
+              weights = (exposure)^0.5, data = rbind(train,valid), offset = log(exposure))
+  valid.py <- predict.glm(fit1, newdata = valid, type="response")
+  formulas[[i]] <- fmla
+  giniScore[i] <- giniTest(y = valid$claim_cost, py = valid.py)
+  i
+}
+
+bestScore <- max(giniScore)
+print(bestScore)
+#0.2344273
+bestFormula <- formulas[[which(giniScore == bestScore)]]
+print(bestFormula)
+#claimcst0 ~ veh_value + veh_body + gender + area + agecat
+```
+
+```{r}
+tweedie_fit <- glm(claim_cost ~ veh_value + veh_body + veh_age + gender + area + dr_age, 
+                   family = tweedie(var.power = 1.5, link.power = 0), 
+                   data = rbind(train,valid), offset = log(exposure), 
+                   weights = (exposure)^0.5)
+#summary(tweedie_fit)
+
+valid_tweedie <- predict.glm(tweedie_fit, valid , type = "response")
+
+test_tweedie <- predict.glm(tweedie_fit, test , type = "response")
+
+# export id,claim_cost
+upl_df <- data.frame(cbind("id"=seq(1:nrow(test)),"claim_cost"=test_tweedie))
+upl_df
+write.csv(upl_df, "tweedie-1.csv", row.names = F)
+```
+
+```{r}
+### Quantile regression
+varnames <- names(train)[2:8] # All available variables may be used for fit
+n <- length(varnames)       # Number of available variables X's
+index <- array(FALSE, n)    # An indicator saying which x's will be used for fit
+giniScore <- array(0, 2^n-1) # An array to collect gini scores 
+formulas <- vector("list", 2^n-1) # An list to collect formulas
+
+for (i in 1:(2^n - 2)) {
+  index <- binary.add(index, n)
+  fmla <- as.formula(paste("claim_cost ~ ", paste(varnames[index], collapse = "+")))
+  fit1 <- rq(formula = fmla, data = rbind(train,valid), tau = 0.95)
+  valid.py <- predict.rq(fit1, newdata = valid)
+  formulas[[i]] <- fmla
+  giniScore[i] <- giniTest(y = valid$claim_cost, py = valid.py*valid_tweedie)
+}
+
+bestScore <- max(giniScore)
+print(bestScore)
+#0.2421196
+bestFormula <- formulas[[which(giniScore == bestScore)]]
+print(bestFormula)
+#claimcst0 ~ veh_value + gender + area
+
+quantile_fit <- rq(claim_cost ~ veh_value + gender + area, 
+                   data = rbind(train,valid), tau = 0.95)
+
+valid_quantile <- predict.rq(quantile_fit, valid, type = "response")
+giniTest(valid$claim_cost, valid_quantile*valid_tweedie)
+#finalclcost <- valid_quantile*valid_tweedie
+
+test_quantile <- predict.rq(quantile_fit, test, type="response")
+finalclcost <- test_quantile*test_tweedie
+
+# export id,claim_cost
+upl_df <- data.frame(cbind(id=seq(1:nrow(test)),claim_cost=finalclcost))
+upl_df
+write.csv(upl_df, "tweedie-2.csv", row.names = F)
+```
+
+# Fitting with full original training
+
+```{r}
+#find power p for tweedie model
+power = tweedie.profile(train_orig$claim_cost~1, weights = train_orig$exposure, 
+                        xi.vec=seq(1.1, 1.9, length=9), do.plot=TRUE)
+power$xi.max
+# power = 1.577551
+```
+
+```{r}
+tweedie_fit2 <- glm(claim_cost ~ veh_value + veh_body + veh_age + gender + area + dr_age, 
+                   family = tweedie(var.power = power$xi.max, link.power = 0), 
+                   data = train_orig, offset = log(exposure), 
+                   weights = (exposure)^0.5)
+#summary(tweedie_fit)
+
+test_tweedie2 <- predict.glm(tweedie_fit2, test , type = "response")
+
+# export id,claim_cost
+upl_df <- data.frame(cbind(id=seq(1:nrow(test)),claim_cost=test_tweedie2))
+upl_df
+write.csv(upl_df, "tweedie-4.csv", row.names = F)
+```
+
+```{r}
+tweedie_fit3 <- glm(log(claim_cost+1) ~ exposure + dr_age + area + gender +
+                      dr_age:area + area:gender + exposure:area + dr_age:gender,
+                    family = tweedie(var.power = power$xi.max, link.power = 0),
+                    data = train_orig,
+                    offset = log(exposure), weights = (exposure)^0.5)
+#summary(tweedie_fit)
+
+test_tweedie3 <- predict.glm(tweedie_fit3, test, type = "response")
+
+# export id,claim_cost
+upl_df <- data.frame(cbind(id=seq(1:nrow(test)),claim_cost=test_tweedie3))
+upl_df
+write.csv(upl_df, "tweedie-5.csv", row.names = F)
+```
